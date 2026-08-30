@@ -84,9 +84,11 @@ user, err := cache.GetOrLoad(ctx, userID, func(ctx context.Context) (User, error
 
 `GetOrLoad` coalesces concurrent loads for the same comparable key.
 `GetOrLoadMany` deduplicates missing keys and safely coalesces overlapping
-single and batch calls per key. Loader errors, panics, or cancellation do not
-publish staged batch values. The default TTL is five minutes, cleanup runs
-every minute, and expiration receives up to one minute of random jitter.
+single and batch calls per key. If a joined load omits a key, the caller retries
+that still-missing key through its own batch loader; this can invoke the loader
+in multiple rounds. Loader errors, panics, or cancellation do not publish
+staged batch values. The default TTL is five minutes, cleanup runs every minute,
+and expiration receives up to one minute of random jitter.
 
 `Get`, `Peek`, and `Contains` never return expired entries. `Len`, `Keys`, and
 `Values` report the physical ARC contents and may briefly include expired

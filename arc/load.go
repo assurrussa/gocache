@@ -61,6 +61,7 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, loader Loader[V]) (V
 
 // GetOrLoadMany returns cached values and batch-loads unique missing keys.
 // Overlapping single and batch calls coalesce by key.
+// The loader may be called in multiple rounds when a joined load omits a key.
 func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiLoader[K, V]) (map[K]V, error) {
 	if c == nil {
 		return nil, ErrNilCache
@@ -92,50 +93,70 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 		return values, nil
 	}
 
-	claims := c.flights.ClaimMany(missing)
-	loadKeys := make([]K, 0, len(missing))
+	pending := missing
+	ownedKeys := make([]K, 0, len(missing))
 	owned := make([]flight.Claim[K, V], 0, len(missing))
-	for index, claim := range claims {
-		if !claim.Owned() {
-			continue
-		}
-		key := missing[index]
-		if value, found := c.lookup(key, true, false); found {
-			values[key] = value
-			claim.Complete(flight.Result[V]{Value: value, Found: true})
-			continue
-		}
-		loadKeys = append(loadKeys, key)
-		owned = append(owned, claim)
-	}
-
-	loaded := map[K]V(nil)
-	if len(loadKeys) > 0 {
-		var err error
-		loaded, err = invokeMultiLoader(ctx, loader, loadKeys)
-		if err != nil {
-			completeWithError(owned, err)
-			return nil, fmt.Errorf("arc: get or load many: %w", err)
-		}
-	}
-
-	for index, claim := range claims {
-		if claim.Owned() {
-			continue
-		}
-		result, err := claim.Wait(ctx)
-		if err != nil {
-			wrapped := fmt.Errorf("arc: wait for batch load: %w", err)
+	loaded := make(map[K]V, len(missing))
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
 			completeWithError(owned, wrapped)
 			return nil, wrapped
 		}
-		if result.Err != nil {
-			completeWithError(owned, result.Err)
-			return nil, fmt.Errorf("arc: get or load many: %w", result.Err)
+
+		claims := c.flights.ClaimMany(pending)
+		loadKeys := make([]K, 0, len(pending))
+		for index, claim := range claims {
+			if !claim.Owned() {
+				continue
+			}
+			key := pending[index]
+			if value, found := c.lookup(key, true, false); found {
+				values[key] = value
+				claim.Complete(flight.Result[V]{Value: value, Found: true})
+				continue
+			}
+			loadKeys = append(loadKeys, key)
+			ownedKeys = append(ownedKeys, key)
+			owned = append(owned, claim)
 		}
-		if result.Found {
-			values[missing[index]] = result.Value
+
+		if len(loadKeys) > 0 {
+			round, err := invokeMultiLoader(ctx, loader, loadKeys)
+			if err != nil {
+				completeWithError(owned, err)
+				return nil, fmt.Errorf("arc: get or load many: %w", err)
+			}
+			for _, key := range loadKeys {
+				if value, found := round[key]; found {
+					loaded[key] = value
+				}
+			}
 		}
+
+		var retry []K
+		for index, claim := range claims {
+			if claim.Owned() {
+				continue
+			}
+			result, err := claim.Wait(ctx)
+			if err != nil {
+				wrapped := fmt.Errorf("arc: wait for batch load: %w", err)
+				completeWithError(owned, wrapped)
+				return nil, wrapped
+			}
+			if result.Err != nil {
+				completeWithError(owned, result.Err)
+				return nil, fmt.Errorf("arc: get or load many: %w", result.Err)
+			}
+			key := pending[index]
+			if result.Found {
+				values[key] = result.Value
+				continue
+			}
+			retry = append(retry, key)
+		}
+		pending = retry
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -143,10 +164,10 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 		completeWithError(owned, wrapped)
 		return nil, wrapped
 	}
-	results := make([]flight.Result[V], len(loadKeys))
-	items := make([]entry[V], len(loadKeys))
+	results := make([]flight.Result[V], len(ownedKeys))
+	items := make([]entry[V], len(ownedKeys))
 	now := c.now()
-	for index, key := range loadKeys {
+	for index, key := range ownedKeys {
 		value, found := loaded[key]
 		if found {
 			items[index] = entry[V]{value: value, expiresAt: c.expiration(now)}
@@ -161,14 +182,14 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 		completeWithError(owned, wrapped)
 		return nil, wrapped
 	}
-	for index, key := range loadKeys {
+	for index, key := range ownedKeys {
 		if results[index].Found {
 			c.cache.Add(key, items[index])
 		}
 	}
 	c.mu.Unlock()
 
-	for index, key := range loadKeys {
+	for index, key := range ownedKeys {
 		if results[index].Found {
 			values[key] = results[index].Value
 		}

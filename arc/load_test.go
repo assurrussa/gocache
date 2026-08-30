@@ -234,6 +234,118 @@ func TestGetOrLoadManyIsolatesLoaderKeyMutationFromClaims(t *testing.T) {
 	}
 }
 
+func TestGetOrLoadManyRetriesKeysOmittedByJoinedBatch(t *testing.T) {
+	cache := newTestCache[int, int](t, "retry-omitted", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	ownerStarted := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, err := cache.GetOrLoadMany(context.Background(), []int{1}, func(context.Context, []int) (map[int]int, error) {
+			close(ownerStarted)
+			<-releaseOwner
+			return nil, nil
+		})
+		ownerResult <- err
+	}()
+	<-ownerStarted
+
+	firstLoadFinished := make(chan struct{})
+	type outcome struct {
+		values map[int]int
+		err    error
+	}
+	result := make(chan outcome, 1)
+	var loaderCalls [][]int
+	go func() {
+		values, err := cache.GetOrLoadMany(context.Background(), []int{1, 2}, func(_ context.Context, keys []int) (map[int]int, error) {
+			loaderCalls = append(loaderCalls, slices.Clone(keys))
+			switch len(loaderCalls) {
+			case 1:
+				close(firstLoadFinished)
+				return map[int]int{2: 20}, nil
+			case 2:
+				return map[int]int{1: 10}, nil
+			default:
+				return nil, errors.New("loader called more than twice")
+			}
+		})
+		result <- outcome{values: values, err: err}
+	}()
+	<-firstLoadFinished
+	if cache.Contains(2) {
+		t.Fatal("staged value was published before the joined key completed")
+	}
+	close(releaseOwner)
+
+	if err := <-ownerResult; err != nil {
+		t.Fatal(err)
+	}
+	loaded := <-result
+	if loaded.err != nil {
+		t.Fatal(loaded.err)
+	}
+	if len(loaderCalls) != 2 || !slices.Equal(loaderCalls[0], []int{2}) || !slices.Equal(loaderCalls[1], []int{1}) {
+		t.Fatalf("loader calls = %v", loaderCalls)
+	}
+	if len(loaded.values) != 2 || loaded.values[1] != 10 || loaded.values[2] != 20 {
+		t.Fatalf("values = %v", loaded.values)
+	}
+}
+
+func TestGetOrLoadManyDoesNotPublishStagedValuesAfterRetryError(t *testing.T) {
+	cache := newTestCache[int, int](t, "retry-error", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	ownerStarted := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, err := cache.GetOrLoadMany(context.Background(), []int{1}, func(context.Context, []int) (map[int]int, error) {
+			close(ownerStarted)
+			<-releaseOwner
+			return nil, nil
+		})
+		ownerResult <- err
+	}()
+	<-ownerStarted
+
+	wantErr := errors.New("retry failed")
+	firstLoadFinished := make(chan struct{})
+	result := make(chan error, 1)
+	loaderCalls := 0
+	go func() {
+		_, err := cache.GetOrLoadMany(context.Background(), []int{1, 2}, func(_ context.Context, keys []int) (map[int]int, error) {
+			loaderCalls++
+			switch loaderCalls {
+			case 1:
+				if !slices.Equal(keys, []int{2}) {
+					return nil, errors.New("unexpected initial keys")
+				}
+				close(firstLoadFinished)
+				return map[int]int{2: 20}, nil
+			case 2:
+				if !slices.Equal(keys, []int{1}) {
+					return nil, errors.New("unexpected retry keys")
+				}
+				return nil, wantErr
+			default:
+				return nil, errors.New("loader called more than twice")
+			}
+		})
+		result <- err
+	}()
+	<-firstLoadFinished
+	close(releaseOwner)
+
+	if err := <-ownerResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; !errors.Is(err, wantErr) {
+		t.Fatalf("batch error = %v, want %v", err, wantErr)
+	}
+	if cache.Contains(2) {
+		t.Fatal("staged value was published after retry error")
+	}
+}
+
 func TestGetOrLoadManyCoalescesOverlappingBatches(t *testing.T) {
 	cache := newTestCache[int, int](t, "overlap", 8, WithoutExpiration(), WithoutPeriodicCleanup())
 	aStarted := make(chan struct{})
