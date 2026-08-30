@@ -26,6 +26,7 @@ func TestNewValidatesInputsAndOptions(t *testing.T) {
 		{name: "zero cleanup", ctx: context.Background(), cache: "test", capacity: 1, options: []Option{WithCleanupInterval(0)}, wantErr: ErrInvalidCleanupInterval},
 		{name: "zero jitter", ctx: context.Background(), cache: "test", capacity: 1, options: []Option{WithTTLJitter(0)}, wantErr: ErrInvalidTTLJitter},
 		{name: "nil metrics", ctx: context.Background(), cache: "test", capacity: 1, options: []Option{WithMetrics(nil)}, wantErr: ErrNilMetrics},
+		{name: "typed nil metrics", ctx: context.Background(), cache: "test", capacity: 1, options: []Option{WithMetrics((*metricRecorder)(nil))}, wantErr: ErrNilMetrics},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -138,6 +139,23 @@ func TestTTLAndJitterApplyToEveryWritePath(t *testing.T) {
 	immortalClock.Set(base.Add(100 * time.Hour))
 	if value, found := immortal.Get(1); !found || value != 7 {
 		t.Fatalf("non-expiring Get() = %d, %t", value, found)
+	}
+
+	maximumTTL := time.Duration(1<<63 - 1)
+	longLived := newTestCache[int, int](t, "long-lived", 1,
+		WithTTL(maximumTTL),
+		WithTTLJitter(2*time.Nanosecond),
+		WithoutPeriodicCleanup(),
+		withNow(clock.Now),
+		withJitter(func(time.Duration) time.Duration { return time.Nanosecond }),
+	)
+	longLived.Set(1, 1)
+	longLived.mu.RLock()
+	item, found := longLived.cache.Peek(1)
+	longLived.mu.RUnlock()
+	wantExpiration := clock.Now().Add(maximumTTL).Add(time.Nanosecond)
+	if !found || !item.expiresAt.Equal(wantExpiration) {
+		t.Fatalf("large TTL expiration = %v, want %v", item.expiresAt, wantExpiration)
 	}
 }
 

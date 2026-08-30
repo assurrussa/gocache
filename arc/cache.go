@@ -266,7 +266,7 @@ func (c *Cache[K, V]) expiration(now time.Time) time.Time {
 	if c.ttlJitter > 0 {
 		offset = c.jitter(c.ttlJitter)
 	}
-	return now.Add(c.ttl + offset)
+	return now.Add(c.ttl).Add(offset)
 }
 
 func (c *Cache[K, V]) isExpired(item entry[V], now time.Time) bool {

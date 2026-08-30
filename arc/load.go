@@ -3,6 +3,7 @@ package arc
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/assurrussa/gocache/internal/flight"
 )
@@ -203,7 +204,7 @@ func invokeMultiLoader[K comparable, V any](ctx context.Context, loader MultiLoa
 			err = fmt.Errorf("%w: %v", ErrLoaderPanic, recovered)
 		}
 	}()
-	values, err = loader(ctx, keys)
+	values, err = loader(ctx, slices.Clone(keys))
 	if err != nil {
 		return nil, fmt.Errorf("arc: multi loader: %w", err)
 	}

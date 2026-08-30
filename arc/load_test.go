@@ -181,6 +181,59 @@ func TestGetOrLoadManyDeduplicatesAndFiltersLoaderResults(t *testing.T) {
 	}
 }
 
+func TestGetOrLoadManyIsolatesLoaderKeyMutationFromClaims(t *testing.T) {
+	cache := newTestCache[int, int](t, "mutated-keys", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	loaderStarted := make(chan struct{})
+	releaseLoader := make(chan struct{})
+	type outcome struct {
+		values map[int]int
+		err    error
+	}
+	batchResult := make(chan outcome, 1)
+	go func() {
+		values, err := cache.GetOrLoadMany(context.Background(), []int{1, 2}, func(_ context.Context, keys []int) (map[int]int, error) {
+			if !slices.Equal(keys, []int{1, 2}) {
+				return nil, errors.New("unexpected loader keys")
+			}
+			keys[0], keys[1] = keys[1], keys[0]
+			close(loaderStarted)
+			<-releaseLoader
+			return map[int]int{1: 10, 2: 20}, nil
+		})
+		batchResult <- outcome{values: values, err: err}
+	}()
+	<-loaderStarted
+
+	firstWaiter := cache.flights.Claim(1)
+	secondWaiter := cache.flights.Claim(2)
+	if firstWaiter.Owned() || secondWaiter.Owned() {
+		t.Fatal("batch claims were not active while the loader was blocked")
+	}
+	close(releaseLoader)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	first, err := firstWaiter.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := secondWaiter.Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Found || first.Value != 10 || !second.Found || second.Value != 20 {
+		t.Fatalf("claim results = (%d, %t), (%d, %t)", first.Value, first.Found, second.Value, second.Found)
+	}
+
+	result := <-batchResult
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if result.values[1] != 10 || result.values[2] != 20 {
+		t.Fatalf("batch values = %v", result.values)
+	}
+}
+
 func TestGetOrLoadManyCoalescesOverlappingBatches(t *testing.T) {
 	cache := newTestCache[int, int](t, "overlap", 8, WithoutExpiration(), WithoutPeriodicCleanup())
 	aStarted := make(chan struct{})

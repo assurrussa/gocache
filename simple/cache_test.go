@@ -26,6 +26,7 @@ func TestNewValidatesInputsAndOptions(t *testing.T) {
 		{name: "negative ttl", ctx: context.Background(), cache: "test", options: []Option{WithTTL(-time.Second)}, wantErr: ErrInvalidTTL},
 		{name: "zero cleanup", ctx: context.Background(), cache: "test", options: []Option{WithCleanupInterval(0)}, wantErr: ErrInvalidCleanupInterval},
 		{name: "nil metrics", ctx: context.Background(), cache: "test", options: []Option{WithMetrics(nil)}, wantErr: ErrNilMetrics},
+		{name: "typed nil metrics", ctx: context.Background(), cache: "test", options: []Option{WithMetrics((*metricRecorder)(nil))}, wantErr: ErrNilMetrics},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

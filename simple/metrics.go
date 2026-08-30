@@ -1,6 +1,9 @@
 package simple
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 // Metrics receives cache counters and gauges. Implementations must be safe
 // for concurrent use and should return promptly.
@@ -29,5 +32,18 @@ func newMetricNames(name string) metricNames {
 		expired:    fmt.Sprintf("cache.%s.expired", name),
 		expiredGet: fmt.Sprintf("cache.%s.expired_get", name),
 		length:     fmt.Sprintf("cache.%s.len", name),
+	}
+}
+
+func isNilMetrics(metrics Metrics) bool {
+	if metrics == nil {
+		return true
+	}
+	value := reflect.ValueOf(metrics)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }

@@ -56,7 +56,7 @@ func WithCleanupInterval(interval time.Duration) Option {
 // WithMetrics configures optional cache metrics.
 func WithMetrics(metrics Metrics) Option {
 	return optionFunc(func(cfg *config) error {
-		if metrics == nil {
+		if isNilMetrics(metrics) {
 			return ErrNilMetrics
 		}
 		cfg.metrics = metrics
