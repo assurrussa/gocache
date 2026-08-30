@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.0 - 2026-08-31
+
 - Add the public `arc` package: a fixed-capacity Adaptive Replacement Cache
   with TTL, jitter, optional metrics, and single/batch cache-aside loaders.
 - Add the public `simple` package: an unbounded concurrent TTL map with

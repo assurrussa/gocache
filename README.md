@@ -10,17 +10,16 @@
 
 ## Release status
 
-The published `v0.1.0` release contains only `rcu`:
+The current release is `v0.2.0` and contains all three cache packages:
 
 ```bash
-go get github.com/assurrussa/gocache@v0.1.0
+go get github.com/assurrussa/gocache@v0.2.0
 ```
 
-The `arc` and `simple` packages are currently unreleased and are available in
-the repository checkout. Their future release is intentionally separate from
-this implementation change.
+The earlier `v0.1.0` release contains only `rcu`; `arc` and `simple` are
+available starting with `v0.2.0`.
 
-Supported package paths in the current checkout:
+Supported package paths:
 
 ```go
 import (
