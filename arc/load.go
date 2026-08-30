@@ -61,7 +61,8 @@ func (c *Cache[K, V]) GetOrLoad(ctx context.Context, key K, loader Loader[V]) (V
 
 // GetOrLoadMany returns cached values and batch-loads unique missing keys.
 // Overlapping single and batch calls coalesce by key.
-// The loader may be called in multiple rounds when a joined load omits a key.
+// When a joined load omits a key, the loader may be called again for every
+// still-missing key because the prior round's staged values are discarded.
 func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiLoader[K, V]) (map[K]V, error) {
 	if c == nil {
 		return nil, ErrNilCache
@@ -94,18 +95,16 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 	}
 
 	pending := missing
-	ownedKeys := make([]K, 0, len(missing))
-	owned := make([]flight.Claim[K, V], 0, len(missing))
-	loaded := make(map[K]V, len(missing))
 	for len(pending) > 0 {
 		if err := ctx.Err(); err != nil {
 			wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
-			completeWithError(owned, wrapped)
 			return nil, wrapped
 		}
 
 		claims := c.flights.ClaimMany(pending)
 		loadKeys := make([]K, 0, len(pending))
+		ownedKeys := make([]K, 0, len(pending))
+		owned := make([]flight.Claim[K, V], 0, len(pending))
 		for index, claim := range claims {
 			if !claim.Owned() {
 				continue
@@ -121,6 +120,7 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 			owned = append(owned, claim)
 		}
 
+		loaded := make(map[K]V, len(loadKeys))
 		if len(loadKeys) > 0 {
 			round, err := invokeMultiLoader(ctx, loader, loadKeys)
 			if err != nil {
@@ -134,7 +134,7 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 			}
 		}
 
-		var retry []K
+		retry := false
 		for index, claim := range claims {
 			if claim.Owned() {
 				continue
@@ -154,46 +154,55 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 				values[key] = result.Value
 				continue
 			}
-			retry = append(retry, key)
+			retry = true
 		}
-		pending = retry
-	}
-
-	if err := ctx.Err(); err != nil {
-		wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
-		completeWithError(owned, wrapped)
-		return nil, wrapped
-	}
-	results := make([]flight.Result[V], len(ownedKeys))
-	items := make([]entry[V], len(ownedKeys))
-	now := c.now()
-	for index, key := range ownedKeys {
-		value, found := loaded[key]
-		if found {
-			items[index] = entry[V]{value: value, expiresAt: c.expiration(now)}
+		if retry {
+			// Release every claim from this attempt before retrying. Retaining
+			// any owned claim while acquiring omitted joined keys could create
+			// a cycle with another overlapping batch. Staged values are not
+			// published, so all still-missing keys are safely retried together.
+			completeWithoutValue(owned)
+			pending = c.remainingMissing(pending, values)
+			continue
 		}
-		results[index] = flight.Result[V]{Value: value, Found: found}
-	}
 
-	c.mu.Lock()
-	if err := ctx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
+			wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
+			completeWithError(owned, wrapped)
+			return nil, wrapped
+		}
+		results := make([]flight.Result[V], len(ownedKeys))
+		items := make([]entry[V], len(ownedKeys))
+		now := c.now()
+		for index, key := range ownedKeys {
+			value, found := loaded[key]
+			if found {
+				items[index] = entry[V]{value: value, expiresAt: c.expiration(now)}
+			}
+			results[index] = flight.Result[V]{Value: value, Found: found}
+		}
+
+		c.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			c.mu.Unlock()
+			wrapped := fmt.Errorf("arc: get or load many canceled before publish: %w", err)
+			completeWithError(owned, wrapped)
+			return nil, wrapped
+		}
+		for index, key := range ownedKeys {
+			if results[index].Found {
+				c.cache.Add(key, items[index])
+			}
+		}
 		c.mu.Unlock()
-		wrapped := fmt.Errorf("arc: get or load many canceled before publish: %w", err)
-		completeWithError(owned, wrapped)
-		return nil, wrapped
-	}
-	for index, key := range ownedKeys {
-		if results[index].Found {
-			c.cache.Add(key, items[index])
-		}
-	}
-	c.mu.Unlock()
 
-	for index, key := range ownedKeys {
-		if results[index].Found {
-			values[key] = results[index].Value
+		for index, key := range ownedKeys {
+			if results[index].Found {
+				values[key] = results[index].Value
+			}
+			owned[index].Complete(results[index])
 		}
-		owned[index].Complete(results[index])
+		return values, nil
 	}
 	return values, nil
 }
@@ -239,6 +248,27 @@ func completeWithError[K comparable, V any](claims []flight.Claim[K, V], err err
 	for _, claim := range claims {
 		claim.Complete(flight.Result[V]{Err: err})
 	}
+}
+
+func completeWithoutValue[K comparable, V any](claims []flight.Claim[K, V]) {
+	for _, claim := range claims {
+		claim.Complete(flight.Result[V]{})
+	}
+}
+
+func (c *Cache[K, V]) remainingMissing(keys []K, values map[K]V) []K {
+	missing := make([]K, 0, len(keys))
+	for _, key := range keys {
+		if _, found := values[key]; found {
+			continue
+		}
+		if value, found := c.lookup(key, true, false); found {
+			values[key] = value
+			continue
+		}
+		missing = append(missing, key)
+	}
+	return missing
 }
 
 func uniqueKeys[K comparable](keys []K) []K {

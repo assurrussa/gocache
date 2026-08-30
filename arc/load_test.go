@@ -3,11 +3,14 @@ package arc
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/assurrussa/gocache/internal/flight"
 )
 
 func TestGetOrLoadValuesErrorsPanicsAndCancellation(t *testing.T) {
@@ -264,7 +267,7 @@ func TestGetOrLoadManyRetriesKeysOmittedByJoinedBatch(t *testing.T) {
 				close(firstLoadFinished)
 				return map[int]int{2: 20}, nil
 			case 2:
-				return map[int]int{1: 10}, nil
+				return map[int]int{1: 10, 2: 20}, nil
 			default:
 				return nil, errors.New("loader called more than twice")
 			}
@@ -284,7 +287,7 @@ func TestGetOrLoadManyRetriesKeysOmittedByJoinedBatch(t *testing.T) {
 	if loaded.err != nil {
 		t.Fatal(loaded.err)
 	}
-	if len(loaderCalls) != 2 || !slices.Equal(loaderCalls[0], []int{2}) || !slices.Equal(loaderCalls[1], []int{1}) {
+	if len(loaderCalls) != 2 || !slices.Equal(loaderCalls[0], []int{2}) || !slices.Equal(loaderCalls[1], []int{1, 2}) {
 		t.Fatalf("loader calls = %v", loaderCalls)
 	}
 	if len(loaded.values) != 2 || loaded.values[1] != 10 || loaded.values[2] != 20 {
@@ -322,7 +325,7 @@ func TestGetOrLoadManyDoesNotPublishStagedValuesAfterRetryError(t *testing.T) {
 				close(firstLoadFinished)
 				return map[int]int{2: 20}, nil
 			case 2:
-				if !slices.Equal(keys, []int{1}) {
+				if !slices.Equal(keys, []int{1, 2}) {
 					return nil, errors.New("unexpected retry keys")
 				}
 				return nil, wantErr
@@ -344,6 +347,90 @@ func TestGetOrLoadManyDoesNotPublishStagedValuesAfterRetryError(t *testing.T) {
 	if cache.Contains(2) {
 		t.Fatal("staged value was published after retry error")
 	}
+}
+
+func TestGetOrLoadManyDoesNotDeadlockAcrossRetryRounds(t *testing.T) {
+	cache := newTestCache[int, int](t, "retry-cycle", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+
+	initialX := cache.flights.Claim(1)
+	barrierZ := cache.flights.Claim(3)
+	if !initialX.Owned() || !barrierZ.Owned() {
+		t.Fatal("initial barrier claims are not owned")
+	}
+	defer initialX.Complete(flight.Result[int]{})
+	defer barrierZ.Complete(flight.Result[int]{})
+
+	testCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	type outcome struct {
+		values map[int]int
+		err    error
+	}
+	aLoaderStarted := make(chan struct{})
+	var signalA sync.Once
+	aResult := make(chan outcome, 1)
+	go func() {
+		values, err := cache.GetOrLoadMany(testCtx, []int{1, 2, 3}, func(_ context.Context, keys []int) (map[int]int, error) {
+			signalA.Do(func() { close(aLoaderStarted) })
+			loaded := make(map[int]int, len(keys))
+			for _, key := range keys {
+				loaded[key] = key * 10
+			}
+			return loaded, nil
+		})
+		aResult <- outcome{values: values, err: err}
+	}()
+
+	select {
+	case <-aLoaderStarted:
+	case <-testCtx.Done():
+		t.Fatal("A loader did not start")
+	}
+	initialX.Complete(flight.Result[int]{})
+
+	bLoaderKeys := make(chan []int, 1)
+	var signalB sync.Once
+	bResult := make(chan outcome, 1)
+	go func() {
+		values, err := cache.GetOrLoadMany(testCtx, []int{1, 2}, func(_ context.Context, keys []int) (map[int]int, error) {
+			signalB.Do(func() { bLoaderKeys <- slices.Clone(keys) })
+			loaded := make(map[int]int, len(keys))
+			for _, key := range keys {
+				loaded[key] = key * 10
+			}
+			return loaded, nil
+		})
+		bResult <- outcome{values: values, err: err}
+	}()
+
+	var loadedByB []int
+	select {
+	case loadedByB = <-bLoaderKeys:
+	case <-testCtx.Done():
+		t.Fatal("B loader did not start")
+	}
+	if !slices.Equal(loadedByB, []int{1}) {
+		t.Fatalf("first B loader keys = %v", loadedByB)
+	}
+	barrierZ.Complete(flight.Result[int]{Value: 30, Found: true})
+
+	waitForResult := func(name string, resultChannel <-chan outcome, expected map[int]int) {
+		t.Helper()
+		select {
+		case result := <-resultChannel:
+			if result.err != nil {
+				t.Fatalf("batch %s error = %v", name, result.err)
+			}
+			if !maps.Equal(result.values, expected) {
+				t.Fatalf("batch %s values = %v", name, result.values)
+			}
+		case <-testCtx.Done():
+			t.Fatalf("batch %s did not complete: %v", name, testCtx.Err())
+		}
+	}
+	waitForResult("A", aResult, map[int]int{1: 10, 2: 20, 3: 30})
+	waitForResult("B", bResult, map[int]int{1: 10, 2: 20})
 }
 
 func TestGetOrLoadManyCoalescesOverlappingBatches(t *testing.T) {

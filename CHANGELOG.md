@@ -8,7 +8,8 @@
   optional metrics and cache-aside loading.
 - Coalesce concurrent loads by comparable key through an internal generic
   coordinator; overlapping ARC batches no longer rely on string keys or the
-  first missing key as a batch identity.
+  first missing key as a batch identity, and retry rounds do not retain claims
+  that could form an ownership cycle.
 - Recover loader panics as sentinel errors, preserve successful zero/nil
   values, and prevent canceled or failed loads from publishing new values.
 - Base the port on `goshared` commit
