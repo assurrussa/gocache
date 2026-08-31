@@ -97,64 +97,17 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 	pending := missing
 	for len(pending) > 0 {
 		if err := ctx.Err(); err != nil {
-			wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
-			return nil, wrapped
+			return nil, fmt.Errorf("arc: get or load many canceled: %w", err)
 		}
 
-		claims := c.flights.ClaimMany(pending)
-		loadKeys := make([]K, 0, len(pending))
-		ownedKeys := make([]K, 0, len(pending))
-		owned := make([]flight.Claim[K, V], 0, len(pending))
-		for index, claim := range claims {
-			if !claim.Owned() {
-				continue
-			}
-			key := pending[index]
-			if value, found := c.lookup(key, true, false); found {
-				values[key] = value
-				claim.Complete(flight.Result[V]{Value: value, Found: true})
-				continue
-			}
-			loadKeys = append(loadKeys, key)
-			ownedKeys = append(ownedKeys, key)
-			owned = append(owned, claim)
+		claims, owned, ownedKeys, loaded, err := c.claimAndLoadOwned(ctx, pending, values, loader)
+		if err != nil {
+			return nil, err
 		}
 
-		loaded := make(map[K]V, len(loadKeys))
-		if len(loadKeys) > 0 {
-			round, err := invokeMultiLoader(ctx, loader, loadKeys)
-			if err != nil {
-				completeWithError(owned, err)
-				return nil, fmt.Errorf("arc: get or load many: %w", err)
-			}
-			for _, key := range loadKeys {
-				if value, found := round[key]; found {
-					loaded[key] = value
-				}
-			}
-		}
-
-		retry := false
-		for index, claim := range claims {
-			if claim.Owned() {
-				continue
-			}
-			result, err := claim.Wait(ctx)
-			if err != nil {
-				wrapped := fmt.Errorf("arc: wait for batch load: %w", err)
-				completeWithError(owned, wrapped)
-				return nil, wrapped
-			}
-			if result.Err != nil {
-				completeWithError(owned, result.Err)
-				return nil, fmt.Errorf("arc: get or load many: %w", result.Err)
-			}
-			key := pending[index]
-			if result.Found {
-				values[key] = result.Value
-				continue
-			}
-			retry = true
+		retry, err := c.waitJoinedClaims(ctx, claims, pending, values, owned)
+		if err != nil {
+			return nil, err
 		}
 		if retry {
 			// Release every claim from this attempt before retrying. Retaining
@@ -166,45 +119,137 @@ func (c *Cache[K, V]) GetOrLoadMany(ctx context.Context, keys []K, loader MultiL
 			continue
 		}
 
-		if err := ctx.Err(); err != nil {
-			wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
-			completeWithError(owned, wrapped)
-			return nil, wrapped
-		}
-		results := make([]flight.Result[V], len(ownedKeys))
-		items := make([]entry[V], len(ownedKeys))
-		now := c.now()
-		for index, key := range ownedKeys {
-			value, found := loaded[key]
-			if found {
-				items[index] = entry[V]{value: value, expiresAt: c.expiration(now)}
-			}
-			results[index] = flight.Result[V]{Value: value, Found: found}
-		}
-
-		c.mu.Lock()
-		if err := ctx.Err(); err != nil {
-			c.mu.Unlock()
-			wrapped := fmt.Errorf("arc: get or load many canceled before publish: %w", err)
-			completeWithError(owned, wrapped)
-			return nil, wrapped
-		}
-		for index, key := range ownedKeys {
-			if results[index].Found {
-				c.cache.Add(key, items[index])
-			}
-		}
-		c.mu.Unlock()
-
-		for index, key := range ownedKeys {
-			if results[index].Found {
-				values[key] = results[index].Value
-			}
-			owned[index].Complete(results[index])
+		if err := c.publishOwnedBatch(ctx, owned, ownedKeys, loaded, values); err != nil {
+			return nil, err
 		}
 		return values, nil
 	}
 	return values, nil
+}
+
+func (c *Cache[K, V]) claimAndLoadOwned(
+	ctx context.Context,
+	pending []K,
+	values map[K]V,
+	loader MultiLoader[K, V],
+) (
+	claims []flight.Claim[K, V],
+	owned []flight.Claim[K, V],
+	ownedKeys []K,
+	loaded map[K]V,
+	err error,
+) {
+	claims = c.flights.ClaimMany(pending)
+	loadKeys := make([]K, 0, len(pending))
+	ownedKeys = make([]K, 0, len(pending))
+	owned = make([]flight.Claim[K, V], 0, len(pending))
+	for index, claim := range claims {
+		if !claim.Owned() {
+			continue
+		}
+		key := pending[index]
+		if value, found := c.lookup(key, true, false); found {
+			values[key] = value
+			claim.Complete(flight.Result[V]{Value: value, Found: true})
+			continue
+		}
+		loadKeys = append(loadKeys, key)
+		ownedKeys = append(ownedKeys, key)
+		owned = append(owned, claim)
+	}
+
+	loaded = make(map[K]V, len(loadKeys))
+	if len(loadKeys) > 0 {
+		round, loadErr := invokeMultiLoader(ctx, loader, loadKeys)
+		if loadErr != nil {
+			completeWithError(owned, loadErr)
+			return nil, nil, nil, nil, fmt.Errorf("arc: get or load many: %w", loadErr)
+		}
+		for _, key := range loadKeys {
+			if value, found := round[key]; found {
+				loaded[key] = value
+			}
+		}
+	}
+	return claims, owned, ownedKeys, loaded, nil
+}
+
+func (c *Cache[K, V]) waitJoinedClaims(
+	ctx context.Context,
+	claims []flight.Claim[K, V],
+	pending []K,
+	values map[K]V,
+	owned []flight.Claim[K, V],
+) (bool, error) {
+	retry := false
+	for index, claim := range claims {
+		if claim.Owned() {
+			continue
+		}
+		result, err := claim.Wait(ctx)
+		if err != nil {
+			wrapped := fmt.Errorf("arc: wait for batch load: %w", err)
+			completeWithError(owned, wrapped)
+			return false, wrapped
+		}
+		if result.Err != nil {
+			completeWithError(owned, result.Err)
+			return false, fmt.Errorf("arc: get or load many: %w", result.Err)
+		}
+		key := pending[index]
+		if result.Found {
+			values[key] = result.Value
+			continue
+		}
+		retry = true
+	}
+	return retry, nil
+}
+
+func (c *Cache[K, V]) publishOwnedBatch(
+	ctx context.Context,
+	owned []flight.Claim[K, V],
+	ownedKeys []K,
+	loaded map[K]V,
+	values map[K]V,
+) error {
+	if err := ctx.Err(); err != nil {
+		wrapped := fmt.Errorf("arc: get or load many canceled: %w", err)
+		completeWithError(owned, wrapped)
+		return wrapped
+	}
+	results := make([]flight.Result[V], len(ownedKeys))
+	items := make([]entry[V], len(ownedKeys))
+	now := c.now()
+	for index, key := range ownedKeys {
+		value, found := loaded[key]
+		if found {
+			items[index] = entry[V]{value: value, expiresAt: c.expiration(now)}
+		}
+		results[index] = flight.Result[V]{Value: value, Found: found}
+	}
+
+	c.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		wrapped := fmt.Errorf("arc: get or load many canceled before publish: %w", err)
+		completeWithError(owned, wrapped)
+		return wrapped
+	}
+	for index, key := range ownedKeys {
+		if results[index].Found {
+			c.cache.Add(key, items[index])
+		}
+	}
+	c.mu.Unlock()
+
+	for index, key := range ownedKeys {
+		if results[index].Found {
+			values[key] = results[index].Value
+		}
+		owned[index].Complete(results[index])
+	}
+	return nil
 }
 
 func invokeLoader[V any](ctx context.Context, loader Loader[V]) (value V, err error) {

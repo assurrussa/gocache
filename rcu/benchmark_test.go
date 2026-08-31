@@ -1,17 +1,19 @@
-package rcu
+package rcu_test
 
 import (
 	"context"
 	"strconv"
 	"testing"
+
+	"github.com/assurrussa/gocache/rcu"
 )
 
 func BenchmarkGet(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		return map[string]int{"key": 42}, nil
-	}, WithoutPeriodicRefresh())
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -34,9 +36,9 @@ func BenchmarkRefresh1000(b *testing.B) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		return source, nil
-	}, WithoutPeriodicRefresh())
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		b.Fatal(err)
 	}

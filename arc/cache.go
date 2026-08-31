@@ -63,9 +63,7 @@ func New[K comparable, V any](ctx context.Context, name string, capacity int, op
 		ttlJitter:       DefaultTTLJitter,
 		metrics:         noopMetrics{},
 		now:             time.Now,
-		jitter: func(maximum time.Duration) time.Duration {
-			return rand.N(maximum) //nolint:gosec // TTL spreading does not require cryptographic randomness.
-		},
+		jitter:          rand.N[time.Duration],
 	}
 	for _, option := range options {
 		if option == nil {

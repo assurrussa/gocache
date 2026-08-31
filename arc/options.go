@@ -26,7 +26,7 @@ type config struct {
 // Option configures a Cache. Options are created by this package's With and
 // Without functions.
 type Option interface {
-	apply(*config) error
+	apply(cfg *config) error
 }
 
 type optionFunc func(*config) error

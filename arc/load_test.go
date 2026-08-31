@@ -1,4 +1,4 @@
-package arc
+package arc_test
 
 import (
 	"context"
@@ -10,12 +10,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assurrussa/gocache/arc"
 	"github.com/assurrussa/gocache/internal/flight"
 )
 
 func TestGetOrLoadValuesErrorsPanicsAndCancellation(t *testing.T) {
-	cache := newTestCache[int, int](t, "load", 8, WithoutExpiration(), WithoutPeriodicCleanup())
-	if value, err := cache.GetOrLoad(context.Background(), 1, func(context.Context) (int, error) { return 0, nil }); err != nil || value != 0 {
+	cache := newTestCache[int, int](t, "load", 8, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
+	if value, err := cache.GetOrLoad(
+		context.Background(),
+		1,
+		func(context.Context) (int, error) { return 0, nil },
+	); err != nil || value != 0 {
 		t.Fatalf("zero value load = %d, %v", value, err)
 	}
 	if value, found := cache.Get(1); !found || value != 0 {
@@ -23,13 +28,21 @@ func TestGetOrLoadValuesErrorsPanicsAndCancellation(t *testing.T) {
 	}
 
 	wantErr := errors.New("source failed")
-	if _, err := cache.GetOrLoad(context.Background(), 2, func(context.Context) (int, error) { return 0, wantErr }); !errors.Is(err, wantErr) {
+	if _, err := cache.GetOrLoad(
+		context.Background(),
+		2,
+		func(context.Context) (int, error) { return 0, wantErr },
+	); !errors.Is(err, wantErr) {
 		t.Fatalf("loader error = %v", err)
 	}
 	if cache.Contains(2) {
 		t.Fatal("failed value was cached")
 	}
-	if _, err := cache.GetOrLoad(context.Background(), 3, func(context.Context) (int, error) { panic("boom") }); !errors.Is(err, ErrLoaderPanic) {
+	if _, err := cache.GetOrLoad(
+		context.Background(),
+		3,
+		func(context.Context) (int, error) { panic("boom") },
+	); !errors.Is(err, arc.ErrLoaderPanic) {
 		t.Fatalf("panic error = %v", err)
 	}
 
@@ -43,17 +56,25 @@ func TestGetOrLoadValuesErrorsPanicsAndCancellation(t *testing.T) {
 	if cache.Contains(4) {
 		t.Fatal("canceled value was cached")
 	}
-	if _, err := cache.GetOrLoad(nil, 5, func(context.Context) (int, error) { //nolint:staticcheck // Verifies the explicit nil-context contract.
-		return 5, nil
-	}); !errors.Is(err, ErrNilContext) {
+	if _, err := cache.GetOrLoad(
+		nil, //nolint:staticcheck // Verifies the explicit nil-context contract.
+		5,
+		func(context.Context) (int, error) {
+			return 5, nil
+		},
+	); !errors.Is(err, arc.ErrNilContext) {
 		t.Fatalf("nil context error = %v", err)
 	}
-	if _, err := cache.GetOrLoad(context.Background(), 5, nil); !errors.Is(err, ErrNilLoader) {
+	if _, err := cache.GetOrLoad(context.Background(), 5, nil); !errors.Is(err, arc.ErrNilLoader) {
 		t.Fatalf("nil loader error = %v", err)
 	}
 
-	pointers := newTestCache[int, *int](t, "nil-value", 2, WithoutExpiration(), WithoutPeriodicCleanup())
-	value, err := pointers.GetOrLoad(context.Background(), 1, func(context.Context) (*int, error) { return nil, nil })
+	pointers := newTestCache[int, *int](t, "nil-value", 2, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
+	value, err := pointers.GetOrLoad(
+		context.Background(),
+		1,
+		func(context.Context) (*int, error) { return nil, nil }, //nolint:nilnil // Intentionally caching nil pointer value.
+	)
 	if err != nil || value != nil {
 		t.Fatalf("nil pointer load = %v, %v", value, err)
 	}
@@ -63,11 +84,11 @@ func TestGetOrLoadValuesErrorsPanicsAndCancellation(t *testing.T) {
 }
 
 func TestGetOrLoadCoalescesSameKeyAndRunsDifferentKeysInParallel(t *testing.T) {
-	cache := newTestCache[int, int](t, "coalesce", 16, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "coalesce", 16, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	var calls atomic.Int32
 	started := make(chan struct{})
 	release := make(chan struct{})
-	loader := func(context.Context) (int, error) {
+	var loader arc.Loader[int] = func(context.Context) (int, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
@@ -96,7 +117,7 @@ func TestGetOrLoadCoalescesSameKeyAndRunsDifferentKeysInParallel(t *testing.T) {
 		t.Fatalf("same-key loader calls = %d, want 1", calls.Load())
 	}
 
-	parallel := newTestCache[int, int](t, "parallel", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	parallel := newTestCache[int, int](t, "parallel", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	startedKeys := make(chan int, 2)
 	releaseBoth := make(chan struct{})
 	result := make(chan error, 2)
@@ -131,7 +152,7 @@ func TestGetOrLoadCoalescesSameKeyAndRunsDifferentKeysInParallel(t *testing.T) {
 }
 
 func TestGetOrLoadWaiterCanCancel(t *testing.T) {
-	cache := newTestCache[int, int](t, "wait-cancel", 2, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "wait-cancel", 2, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	started := make(chan struct{})
 	release := make(chan struct{})
 	leaderDone := make(chan error, 1)
@@ -146,7 +167,11 @@ func TestGetOrLoadWaiterCanCancel(t *testing.T) {
 	<-started
 	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := cache.GetOrLoad(waitCtx, 1, func(context.Context) (int, error) { return 2, nil }); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := cache.GetOrLoad(
+		waitCtx,
+		1,
+		func(context.Context) (int, error) { return 2, nil },
+	); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waiter error = %v", err)
 	}
 	close(release)
@@ -156,13 +181,17 @@ func TestGetOrLoadWaiterCanCancel(t *testing.T) {
 }
 
 func TestGetOrLoadManyDeduplicatesAndFiltersLoaderResults(t *testing.T) {
-	cache := newTestCache[int, int](t, "many", 8, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "many", 8, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	cache.Set(1, 10)
 	var received []int
-	values, err := cache.GetOrLoadMany(context.Background(), []int{1, 2, 2, 3}, func(_ context.Context, keys []int) (map[int]int, error) {
-		received = slices.Clone(keys)
-		return map[int]int{2: 20, 4: 40}, nil
-	})
+	values, err := cache.GetOrLoadMany(
+		context.Background(),
+		[]int{1, 2, 2, 3},
+		func(_ context.Context, keys []int) (map[int]int, error) {
+			received = slices.Clone(keys)
+			return map[int]int{2: 20, 4: 40}, nil
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,17 +204,21 @@ func TestGetOrLoadManyDeduplicatesAndFiltersLoaderResults(t *testing.T) {
 	if cache.Contains(3) || cache.Contains(4) {
 		t.Fatal("omitted or unexpected loader keys were cached")
 	}
-	empty, err := cache.GetOrLoadMany(context.Background(), nil, func(context.Context, []int) (map[int]int, error) {
-		t.Fatal("empty load invoked loader")
-		return nil, nil
-	})
+	empty, err := cache.GetOrLoadMany(
+		context.Background(),
+		nil,
+		func(context.Context, []int) (map[int]int, error) {
+			t.Fatal("empty load invoked loader")
+			return map[int]int{}, nil
+		},
+	)
 	if err != nil || len(empty) != 0 {
 		t.Fatalf("empty load = %v, %v", empty, err)
 	}
 }
 
 func TestGetOrLoadManyIsolatesLoaderKeyMutationFromClaims(t *testing.T) {
-	cache := newTestCache[int, int](t, "mutated-keys", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "mutated-keys", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	loaderStarted := make(chan struct{})
 	releaseLoader := make(chan struct{})
 	type outcome struct {
@@ -207,8 +240,8 @@ func TestGetOrLoadManyIsolatesLoaderKeyMutationFromClaims(t *testing.T) {
 	}()
 	<-loaderStarted
 
-	firstWaiter := cache.flights.Claim(1)
-	secondWaiter := cache.flights.Claim(2)
+	firstWaiter := cache.ClaimFlight(1)
+	secondWaiter := cache.ClaimFlight(2)
 	if firstWaiter.Owned() || secondWaiter.Owned() {
 		t.Fatal("batch claims were not active while the loader was blocked")
 	}
@@ -238,7 +271,7 @@ func TestGetOrLoadManyIsolatesLoaderKeyMutationFromClaims(t *testing.T) {
 }
 
 func TestGetOrLoadManyRetriesKeysOmittedByJoinedBatch(t *testing.T) {
-	cache := newTestCache[int, int](t, "retry-omitted", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "retry-omitted", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	ownerStarted := make(chan struct{})
 	releaseOwner := make(chan struct{})
 	ownerResult := make(chan error, 1)
@@ -246,7 +279,7 @@ func TestGetOrLoadManyRetriesKeysOmittedByJoinedBatch(t *testing.T) {
 		_, err := cache.GetOrLoadMany(context.Background(), []int{1}, func(context.Context, []int) (map[int]int, error) {
 			close(ownerStarted)
 			<-releaseOwner
-			return nil, nil
+			return map[int]int{}, nil
 		})
 		ownerResult <- err
 	}()
@@ -296,7 +329,7 @@ func TestGetOrLoadManyRetriesKeysOmittedByJoinedBatch(t *testing.T) {
 }
 
 func TestGetOrLoadManyDoesNotPublishStagedValuesAfterRetryError(t *testing.T) {
-	cache := newTestCache[int, int](t, "retry-error", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "retry-error", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	ownerStarted := make(chan struct{})
 	releaseOwner := make(chan struct{})
 	ownerResult := make(chan error, 1)
@@ -304,7 +337,7 @@ func TestGetOrLoadManyDoesNotPublishStagedValuesAfterRetryError(t *testing.T) {
 		_, err := cache.GetOrLoadMany(context.Background(), []int{1}, func(context.Context, []int) (map[int]int, error) {
 			close(ownerStarted)
 			<-releaseOwner
-			return nil, nil
+			return map[int]int{}, nil
 		})
 		ownerResult <- err
 	}()
@@ -350,10 +383,10 @@ func TestGetOrLoadManyDoesNotPublishStagedValuesAfterRetryError(t *testing.T) {
 }
 
 func TestGetOrLoadManyDoesNotDeadlockAcrossRetryRounds(t *testing.T) {
-	cache := newTestCache[int, int](t, "retry-cycle", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "retry-cycle", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 
-	initialX := cache.flights.Claim(1)
-	barrierZ := cache.flights.Claim(3)
+	initialX := cache.ClaimFlight(1)
+	barrierZ := cache.ClaimFlight(3)
 	if !initialX.Owned() || !barrierZ.Owned() {
 		t.Fatal("initial barrier claims are not owned")
 	}
@@ -434,7 +467,7 @@ func TestGetOrLoadManyDoesNotDeadlockAcrossRetryRounds(t *testing.T) {
 }
 
 func TestGetOrLoadManyCoalescesOverlappingBatches(t *testing.T) {
-	cache := newTestCache[int, int](t, "overlap", 8, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "overlap", 8, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	aStarted := make(chan struct{})
 	releaseA := make(chan struct{})
 	type outcome struct {
@@ -493,7 +526,7 @@ func TestGetOrLoadManyCoalescesOverlappingBatches(t *testing.T) {
 }
 
 func TestGetOrLoadManyDoesNotPublishStagedValuesAfterJoinedError(t *testing.T) {
-	cache := newTestCache[int, int](t, "overlap-error", 8, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "overlap-error", 8, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	wantErr := errors.New("shared load failed")
 	ownerStarted := make(chan struct{})
 	releaseOwner := make(chan struct{})
@@ -502,7 +535,7 @@ func TestGetOrLoadManyDoesNotPublishStagedValuesAfterJoinedError(t *testing.T) {
 		_, err := cache.GetOrLoadMany(context.Background(), []int{2}, func(context.Context, []int) (map[int]int, error) {
 			close(ownerStarted)
 			<-releaseOwner
-			return nil, wantErr
+			return map[int]int{}, wantErr
 		})
 		ownerResult <- err
 	}()
@@ -535,16 +568,20 @@ func TestGetOrLoadManyDoesNotPublishStagedValuesAfterJoinedError(t *testing.T) {
 
 func TestSingleLoadJoinsBatchByComparableKey(t *testing.T) {
 	type key struct{ ID int }
-	cache := newTestCache[key, int](t, "cross", 4, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[key, int](t, "cross", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	started := make(chan struct{})
 	release := make(chan struct{})
 	batchDone := make(chan error, 1)
 	go func() {
-		_, err := cache.GetOrLoadMany(context.Background(), []key{{ID: 1}}, func(context.Context, []key) (map[key]int, error) {
-			close(started)
-			<-release
-			return map[key]int{{ID: 1}: 10}, nil
-		})
+		_, err := cache.GetOrLoadMany(
+			context.Background(),
+			[]key{{ID: 1}},
+			func(context.Context, []key) (map[key]int, error) {
+				close(started)
+				<-release
+				return map[key]int{{ID: 1}: 10}, nil
+			},
+		)
 		batchDone <- err
 	}()
 	<-started
@@ -573,16 +610,24 @@ func TestSingleLoadJoinsBatchByComparableKey(t *testing.T) {
 }
 
 func TestGetOrLoadManyValidationErrorsAndCancellation(t *testing.T) {
-	cache := newTestCache[int, int](t, "many-errors", 4, WithoutExpiration(), WithoutPeriodicCleanup())
-	if _, err := cache.GetOrLoadMany(nil, []int{1}, func(context.Context, []int) (map[int]int, error) { //nolint:staticcheck // Verifies the explicit nil-context contract.
-		return nil, nil
-	}); !errors.Is(err, ErrNilContext) {
+	cache := newTestCache[int, int](t, "many-errors", 4, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
+	if _, err := cache.GetOrLoadMany(
+		nil, //nolint:staticcheck // Verifies the explicit nil-context contract.
+		[]int{1},
+		func(context.Context, []int) (map[int]int, error) {
+			return map[int]int{}, nil
+		},
+	); !errors.Is(err, arc.ErrNilContext) {
 		t.Fatalf("nil context error = %v", err)
 	}
-	if _, err := cache.GetOrLoadMany(context.Background(), []int{1}, nil); !errors.Is(err, ErrNilLoader) {
+	if _, err := cache.GetOrLoadMany(context.Background(), []int{1}, nil); !errors.Is(err, arc.ErrNilLoader) {
 		t.Fatalf("nil loader error = %v", err)
 	}
-	if _, err := cache.GetOrLoadMany(context.Background(), []int{1}, func(context.Context, []int) (map[int]int, error) { panic("boom") }); !errors.Is(err, ErrLoaderPanic) {
+	if _, err := cache.GetOrLoadMany(
+		context.Background(),
+		[]int{1},
+		func(context.Context, []int) (map[int]int, error) { panic("boom") },
+	); !errors.Is(err, arc.ErrLoaderPanic) {
 		t.Fatalf("panic error = %v", err)
 	}
 	wantErr := errors.New("batch failed")
@@ -607,7 +652,7 @@ func TestGetOrLoadManyValidationErrorsAndCancellation(t *testing.T) {
 }
 
 func TestConcurrentOperations(t *testing.T) {
-	cache := newTestCache[int, int](t, "race", 64, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache := newTestCache[int, int](t, "race", 64, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	var wait sync.WaitGroup
 	for worker := range 12 {
 		wait.Add(1)
