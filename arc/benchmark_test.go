@@ -1,9 +1,11 @@
-package arc
+package arc_test
 
 import (
 	"context"
 	"strconv"
 	"testing"
+
+	"github.com/assurrussa/gocache/arc"
 )
 
 func BenchmarkGet(b *testing.B) {
@@ -48,7 +50,13 @@ func BenchmarkGetOrLoadMany(b *testing.B) {
 			}
 			b.ReportAllocs()
 			for range b.N {
-				_, err := cache.GetOrLoadMany(context.Background(), keys, func(context.Context, []int) (map[int]int, error) { return nil, nil })
+				_, err := cache.GetOrLoadMany(
+					context.Background(),
+					keys,
+					func(context.Context, []int) (map[int]int, error) {
+						return map[int]int{}, nil
+					},
+				)
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -57,11 +65,11 @@ func BenchmarkGetOrLoadMany(b *testing.B) {
 	}
 }
 
-func benchmarkCache[K comparable, V any](b *testing.B, capacity int) *Cache[K, V] {
+func benchmarkCache[K comparable, V any](b *testing.B, capacity int) *arc.Cache[K, V] {
 	b.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	b.Cleanup(cancel)
-	cache, err := New[K, V](ctx, "benchmark", capacity, WithoutExpiration(), WithoutPeriodicCleanup())
+	cache, err := arc.New[K, V](ctx, "benchmark", capacity, arc.WithoutExpiration(), arc.WithoutPeriodicCleanup())
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-package rcu
+package rcu_test
 
 import (
 	"context"
@@ -7,7 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/assurrussa/gocache/rcu"
 )
+
+const callsKey = "calls"
 
 func TestNewValidatesInputsAndOptions(t *testing.T) {
 	loader := func(context.Context) (map[string]int, error) {
@@ -15,21 +19,40 @@ func TestNewValidatesInputsAndOptions(t *testing.T) {
 	}
 	tests := []struct {
 		name    string
-		ctx     context.Context
-		loader  Loader[string, int]
-		options []Option
+		nilCtx  bool
+		loader  rcu.Loader[string, int]
+		options []rcu.Option
 		wantErr error
 	}{
-		{name: "nil context", loader: loader, wantErr: ErrNilContext},
-		{name: "nil loader", ctx: context.Background(), wantErr: ErrNilLoader},
-		{name: "nil option", ctx: context.Background(), loader: loader, options: []Option{nil}, wantErr: ErrNilOption},
-		{name: "zero interval", ctx: context.Background(), loader: loader, options: []Option{WithRefreshInterval(0)}, wantErr: ErrInvalidRefreshInterval},
-		{name: "negative interval", ctx: context.Background(), loader: loader, options: []Option{WithRefreshInterval(-time.Second)}, wantErr: ErrInvalidRefreshInterval},
-		{name: "nil error handler", ctx: context.Background(), loader: loader, options: []Option{WithErrorHandler(nil)}, wantErr: ErrNilErrorHandler},
+		{name: "nil context", nilCtx: true, loader: loader, wantErr: rcu.ErrNilContext},
+		{name: "nil loader", wantErr: rcu.ErrNilLoader},
+		{name: "nil option", loader: loader, options: []rcu.Option{nil}, wantErr: rcu.ErrNilOption},
+		{
+			name:    "zero interval",
+			loader:  loader,
+			options: []rcu.Option{rcu.WithRefreshInterval(0)},
+			wantErr: rcu.ErrInvalidRefreshInterval,
+		},
+		{
+			name:    "negative interval",
+			loader:  loader,
+			options: []rcu.Option{rcu.WithRefreshInterval(-time.Second)},
+			wantErr: rcu.ErrInvalidRefreshInterval,
+		},
+		{
+			name:    "nil error handler",
+			loader:  loader,
+			options: []rcu.Option{rcu.WithErrorHandler(nil)},
+			wantErr: rcu.ErrNilErrorHandler,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cache, err := New(test.ctx, test.loader, test.options...)
+			ctx := context.Background()
+			if test.nilCtx {
+				ctx = nil
+			}
+			cache, err := rcu.New(ctx, test.loader, test.options...)
 			if !errors.Is(err, test.wantErr) {
 				t.Fatalf("New() error = %v, want %v", err, test.wantErr)
 			}
@@ -44,9 +67,9 @@ func TestInitialLoadPublishesCopiedSnapshot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	source := map[string]int{"active": 2, "done": 4}
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		return source, nil
-	}, WithoutPeriodicRefresh())
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,12 +101,12 @@ func TestFailedRefreshPreservesLastGoodSnapshot(t *testing.T) {
 	var fail atomic.Bool
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		if fail.Load() {
 			return nil, wantErr
 		}
 		return map[string]int{"ready": 7}, nil
-	}, WithoutPeriodicRefresh())
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +140,7 @@ func TestRefreshSerializesLoaderCalls(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, loader, WithoutPeriodicRefresh())
+	cache, err := rcu.New(ctx, loader, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,11 +178,11 @@ func TestNotifyCoalescesBurstWhileRefreshRuns(t *testing.T) {
 		case 3:
 			close(thirdFinished)
 		}
-		return map[string]int{"calls": int(call)}, nil
+		return map[string]int{callsKey: int(call)}, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, loader, WithoutPeriodicRefresh())
+	cache, err := rcu.New(ctx, loader, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,10 +214,10 @@ func TestNotifyCoalescesBurstWhileRefreshRuns(t *testing.T) {
 func TestPeriodicRefreshAndContextBoundWorker(t *testing.T) {
 	var calls atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		call := calls.Add(1)
-		return map[string]int{"calls": int(call)}, nil
-	}, WithRefreshInterval(5*time.Millisecond))
+		return map[string]int{callsKey: int(call)}, nil
+	}, rcu.WithRefreshInterval(5*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,9 +251,9 @@ func TestBackgroundErrorHandlerAndWaitInitial(t *testing.T) {
 	errorsCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		return nil, wantErr
-	}, WithoutPeriodicRefresh(), WithErrorHandler(func(_ context.Context, err error) {
+	}, rcu.WithoutPeriodicRefresh(), rcu.WithErrorHandler(func(_ context.Context, err error) {
 		errorsCh <- err
 	}))
 	if err != nil {
@@ -253,10 +276,10 @@ func TestWaitInitialHonorsCallerContext(t *testing.T) {
 	loaderRelease := make(chan struct{})
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	defer cancelWorker()
-	cache, err := New(workerCtx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(workerCtx, func(context.Context) (map[string]int, error) {
 		<-loaderRelease
 		return map[string]int{}, nil
-	}, WithoutPeriodicRefresh())
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,10 +298,10 @@ func TestWaitInitialSupportsMultipleCallers(t *testing.T) {
 	release := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cache, err := New(ctx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(ctx, func(context.Context) (map[string]int, error) {
 		<-release
 		return map[string]int{"ready": 1}, nil
-	}, WithoutPeriodicRefresh())
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,10 +323,10 @@ func TestWaitInitialSupportsMultipleCallers(t *testing.T) {
 func TestExplicitRefreshRemainsAvailableAfterWorkerStops(t *testing.T) {
 	var calls atomic.Int32
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	cache, err := New(workerCtx, func(context.Context) (map[string]int, error) {
+	cache, err := rcu.New(workerCtx, func(context.Context) (map[string]int, error) {
 		call := calls.Add(1)
-		return map[string]int{"calls": int(call)}, nil
-	}, WithoutPeriodicRefresh())
+		return map[string]int{callsKey: int(call)}, nil
+	}, rcu.WithoutPeriodicRefresh())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,23 +342,23 @@ func TestExplicitRefreshRemainsAvailableAfterWorkerStops(t *testing.T) {
 	if err := cache.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh() after worker stop error = %v", err)
 	}
-	if value, _ := cache.Get("calls"); value != 2 {
+	if value, _ := cache.Get(callsKey); value != 2 {
 		t.Fatalf("refreshed value = %d, want 2", value)
 	}
 }
 
 func TestNilCacheReadMethodsAreSafe(t *testing.T) {
-	var cache *Cache[string, int]
+	var cache *rcu.Cache[string, int]
 	if value, found := cache.Get("missing"); found || value != 0 {
 		t.Fatalf("Get() = %d, %t", value, found)
 	}
 	if cache.Len() != 0 || len(cache.Snapshot()) != 0 {
 		t.Fatal("nil cache returned data")
 	}
-	if err := cache.Refresh(context.Background()); !errors.Is(err, ErrNilCache) {
+	if err := cache.Refresh(context.Background()); !errors.Is(err, rcu.ErrNilCache) {
 		t.Fatalf("Refresh() error = %v, want ErrNilCache", err)
 	}
-	if err := cache.WaitInitial(context.Background()); !errors.Is(err, ErrNilCache) {
+	if err := cache.WaitInitial(context.Background()); !errors.Is(err, rcu.ErrNilCache) {
 		t.Fatalf("WaitInitial() error = %v, want ErrNilCache", err)
 	}
 	cache.Notify()

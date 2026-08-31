@@ -1,10 +1,12 @@
-package simple
+package simple_test
 
 import (
 	"context"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/assurrussa/gocache/simple"
 )
 
 func BenchmarkGet(b *testing.B) {
@@ -38,11 +40,11 @@ func BenchmarkGetOrLoad(b *testing.B) {
 	}
 }
 
-func benchmarkCache[K comparable, V any](b *testing.B) *Cache[K, V] {
+func benchmarkCache[K comparable, V any](b *testing.B) *simple.Cache[K, V] {
 	b.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	b.Cleanup(cancel)
-	cache, err := New[K, V](ctx, "benchmark", WithCleanupInterval(time.Hour))
+	cache, err := simple.New[K, V](ctx, "benchmark", simple.WithCleanupInterval(time.Hour))
 	if err != nil {
 		b.Fatal(err)
 	}
