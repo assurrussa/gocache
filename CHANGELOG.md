@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.2.1 - 2026-08-31
+
+- Add a pinned golangci-lint v2 configuration and install the matching binary
+  in GitHub Actions before running the canonical validation gate.
+- Strengthen `make check` with module tidiness, non-mutating formatting,
+  build, vet, lint, repeated race tests, and a minimum coverage threshold.
+- Validate the public package APIs from external test packages while retaining
+  deterministic coverage of internal timing and coordination behavior.
+- Refactor ARC multi-key load coordination into smaller helpers without
+  changing retry, publication, cancellation, or coalescing semantics.
+- Add quick `make bench` and repeatable `make bench-all` benchmark targets.
+
 ## v0.2.0 - 2026-08-31
 
 - Add the public `arc` package: a fixed-capacity Adaptive Replacement Cache
