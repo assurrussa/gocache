@@ -10,11 +10,14 @@
 
 ## Release status
 
-The current release is `v0.2.0` and contains all three cache packages:
+The current release is `v0.2.1` and contains all three cache packages:
 
 ```bash
-go get github.com/assurrussa/gocache@v0.2.0
+go get github.com/assurrussa/gocache@v0.2.1
 ```
+
+`v0.2.1` strengthens linting, test isolation, and release gates without
+changing the supported package paths or runtime behavior.
 
 The earlier `v0.1.0` release contains only `rcu`; `arc` and `simple` are
 available starting with `v0.2.0`.
