@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -31,9 +30,9 @@ type Cache[K comparable, V any] struct {
 	refreshInterval time.Duration
 	errorHandler    ErrorHandler
 
-	data      atomic.Pointer[map[K]V]
-	refreshMu sync.Mutex
-	notify    chan struct{}
+	data        atomic.Pointer[map[K]V]
+	refreshGate chan struct{}
+	notify      chan struct{}
 
 	initialDone chan struct{}
 	initialErr  error
@@ -67,6 +66,7 @@ func New[K comparable, V any](
 		loader:          loader,
 		refreshInterval: cfg.refreshInterval,
 		errorHandler:    cfg.errorHandler,
+		refreshGate:     make(chan struct{}, 1),
 		notify:          make(chan struct{}, notificationBuffer),
 		initialDone:     make(chan struct{}),
 		done:            make(chan struct{}),
@@ -107,7 +107,8 @@ func (c *Cache[K, V]) Snapshot() map[K]V {
 
 // Refresh synchronously builds and atomically publishes one complete
 // snapshot. Concurrent calls are serialized. A failed refresh preserves the
-// previously published snapshot.
+// previously published snapshot. Cancellation also interrupts waiting for
+// another refresh to finish.
 func (c *Cache[K, V]) Refresh(ctx context.Context) error {
 	if c == nil {
 		return ErrNilCache
@@ -116,8 +117,12 @@ func (c *Cache[K, V]) Refresh(ctx context.Context) error {
 		return ErrNilContext
 	}
 
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
+	select {
+	case c.refreshGate <- struct{}{}:
+		defer func() { <-c.refreshGate }()
+	case <-ctx.Done():
+		return fmt.Errorf("rcu: refresh canceled while waiting: %w", ctx.Err())
+	}
 
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("rcu: refresh canceled before load: %w", err)
