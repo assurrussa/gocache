@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Honor RCU refresh cancellation while waiting for another loader, including
+  background worker shutdown while an independent explicit refresh is running.
+  Loader calls remain serialized; cancellation does not interrupt a loader
+  running with a different caller's context.
+
 ## v0.2.1 - 2026-08-31
 
 - Add a pinned golangci-lint v2 configuration and install the matching binary
